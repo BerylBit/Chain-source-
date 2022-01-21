@@ -1,338 +1,208 @@
-## EVM state transition tool
+# ethers-provider-flashbots-bundle
 
-The `evm t8n` tool is a stateless state transition utility. It is a utility
-which can
+This repository contains the `FlashbotsBundleProvider` ethers.js provider, an additional `Provider` to `ethers.js` to enable high-level access to `eth_sendBundle` and `eth_callBundle` rpc endpoint on [mev-relay](https://github.com/flashbots/mev-relay-js). **`mev-relay` is a hosted service; it is not necessary to run `mev-relay` or `mev-geth` to proceed with this example.** 
 
-1. Take a prestate, including
-- Accounts,
-- Block context information,
-- Previous blockshashes (*optional)
-2. Apply a set of transactions,
-3. Apply a mining-reward (*optional),
-4. And generate a post-state, including
-- State root, transaction root, receipt root,
-- Information about rejected transactions,
-- Optionally: a full or partial post-state dump
+Flashbots-enabled relays and miners expose two new jsonrpc endpoints: `eth_sendBundle` and `eth_callBundle`. Since these are non-standard endpoints, ethers.js and other libraries do not natively support these requests (like `getTransactionCount`). In order to interact with these endpoints, you will need access to another full-featured (non-Flashbots) endpoint for nonce-calculation, gas estimation, and transaction status.
 
-## Specification
+One key feature this library provides is **payload signing**, a requirement to submit Flashbot bundles to the `mev-relay` service. This library takes care of the signing process via the `authSigner` passed into the constructor. [Read more about relay signatures here](https://github.com/flashbots/mev-relay-js#authentication)
 
-The idea is to specify the behaviour of this binary very _strict_, so that other
-node implementors can build replicas based on their own state-machines, and the
-state generators can swap between a `geth`-based implementation and a `parityvm`-based
-implementation.
+This library is not a fully functional ethers.js implementation, just a simple provider class, designed to interact with an existing [ethers.js v5 installation](https://github.com/ethers-io/ethers.js/).
 
-### Command line params
+## Example
 
-Command line params that has to be supported are
+Install ethers.js and the Flashbots ethers bundle provider
+```bash
+npm install --save ethers
+npm install --save @flashbots/ethers-provider-bundle
 ```
 
-   --trace                            Output full trace logs to files <txhash>.jsonl
-   --trace.nomemory                   Disable full memory dump in traces
-   --trace.nostack                    Disable stack output in traces
-   --trace.noreturndata               Disable return data output in traces
-   --output.basedir value             Specifies where output files are placed. Will be created if it does not exist.
-   --output.alloc alloc               Determines where to put the alloc of the post-state.
-                                      `stdout` - into the stdout output
-                                      `stderr` - into the stderr output
-   --output.result result             Determines where to put the result (stateroot, txroot etc) of the post-state.
-                                      `stdout` - into the stdout output
-                                      `stderr` - into the stderr output
-   --output.body value                If set, the RLP of the transactions (block body) will be written to this file.
-   --input.txs stdin                  stdin or file name of where to find the transactions to apply. If the file prefix is '.rlp', then the data is interpreted as an RLP list of signed transactions.The '.rlp' format is identical to the output.body format. (default: "txs.json")
-   --state.fork value                 Name of ruleset to use.
-   --state.chainid value              ChainID to use (default: 1)
-   --state.reward value               Mining reward. Set to -1 to disable (default: 0)
+Open up a new TypeScript file (this also works with JavaScript if you prefer)
 
+```ts
+import { providers, Wallet } from "ethers";
+import { FlashbotsBundleProvider } from "@flashbots/ethers-provider-bundle";
+
+// Standard json rpc provider directly from ethers.js (NOT Flashbots)
+const provider = new providers.JsonRpcProvider({ url: ETHEREUM_RPC_URL }, 1)
+
+// `authSigner` is an Ethereum private key that does NOT store funds and is NOT your bot's primary key.
+// This is an identifying key for signing payloads to establish reputation and whitelisting
+// In production, this should be used across multiple bundles to build relationship. In this example, we generate a new wallet each time
+const authSigner = Wallet.createRandom();
+
+// Flashbots provider requires passing in a standard provider
+const flashbotsProvider = await FlashbotsBundleProvider.create(
+  provider, // a normal ethers.js provider, to perform gas estimiations and nonce lookups
+  authSigner // ethers.js signer wallet, only for signing request payloads, not transactions
+)
 ```
 
-### Error codes and output
+From here, you have a `flashbotsProvider` object setup which can now perform either an `eth_callBundle` (via `simulate()`) or `eth_sendBundle` (via `sendBundle`). Each of these functions act on an array of `Bundle Transactions`
 
-All logging should happen against the `stderr`.
-There are a few (not many) errors that can occur, those are defined below.
+## Bundle Transactions
 
-#### EVM-based errors (`2` to `9`)
+Both `simulate` and `sendBundle` operate on a bundle of strictly-ordered transactions. While the miner requires signed transactions, the provider library will accept a mix of pre-signed transaction and `TransactionRequest + Signer` transactions (which it will estimate, nonce-calculate, and sign before sending to the `mev-relay`)
 
-- Other EVM error. Exit code `2`
-- Failed configuration: when a non-supported or invalid fork was specified. Exit code `3`.
-- Block history is not supplied, but needed for a `BLOCKHASH` operation. If `BLOCKHASH`
-  is invoked targeting a block which history has not been provided for, the program will
-  exit with code `4`.
-
-#### IO errors (`10`-`20`)
-
-- Invalid input json: the supplied data could not be marshalled.
-  The program will exit with code `10`
-- IO problems: failure to load or save files, the program will exit with code `11`
-
-## Examples
-### Basic usage
-
-Invoking it with the provided example files
-```
-./evm t8n --input.alloc=./testdata/1/alloc.json --input.txs=./testdata/1/txs.json --input.env=./testdata/1/env.json
-```
-Two resulting files:
-
-`alloc.json`:
-```json
-{
- "0x8a8eafb1cf62bfbeb1741769dae1a9dd47996192": {
-  "balance": "0xfeed1a9d",
-  "nonce": "0x1"
- },
- "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
-  "balance": "0x5ffd4878be161d74",
-  "nonce": "0xac"
- },
- "0xc94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
-  "balance": "0xa410"
- }
+```ts
+const wallet = new Wallet(PRIVATE_KEY)
+const transaction = {
+  to: CONTRACT_ADDRESS,
+  data: CALL_DATA
 }
-```
-`result.json`:
-```json
-{
- "stateRoot": "0x84208a19bc2b46ada7445180c1db162be5b39b9abc8c0a54b05d32943eae4e13",
- "txRoot": "0xc4761fd7b87ff2364c7c60b6c5c8d02e522e815328aaea3f20e3b7b7ef52c42d",
- "receiptRoot": "0x056b23fbba480696b65fe5a59b8f2148a1299103c4f57df839233af2cf4ca2d2",
- "logsHash": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
- "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
- "receipts": [
-  {
-   "root": "0x",
-   "status": "0x1",
-   "cumulativeGasUsed": "0x5208",
-   "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-   "logs": null,
-   "transactionHash": "0x0557bacce3375c98d806609b8d5043072f0b6a8bae45ae5a67a00d3a1a18d673",
-   "contractAddress": "0x0000000000000000000000000000000000000000",
-   "gasUsed": "0x5208",
-   "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
-   "transactionIndex": "0x0"
-  }
- ],
- "rejected": [
-  {
-   "index": 1,
-   "error": "nonce too low: address 0x8A8eAFb1cf62BfBeb1741769DAE1a9dd47996192, tx: 0 state: 1"
-  }
- ]
-}
-```
-
-We can make them spit out the data to e.g. `stdout` like this:
-```
-./evm t8n --input.alloc=./testdata/1/alloc.json --input.txs=./testdata/1/txs.json --input.env=./testdata/1/env.json --output.result=stdout --output.alloc=stdout
-```
-Output:
-```json
-{
- "alloc": {
-  "0x8a8eafb1cf62bfbeb1741769dae1a9dd47996192": {
-   "balance": "0xfeed1a9d",
-   "nonce": "0x1"
-  },
-  "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
-   "balance": "0x5ffd4878be161d74",
-   "nonce": "0xac"
-  },
-  "0xc94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
-   "balance": "0xa410"
-  }
- },
- "result": {
-  "stateRoot": "0x84208a19bc2b46ada7445180c1db162be5b39b9abc8c0a54b05d32943eae4e13",
-  "txRoot": "0xc4761fd7b87ff2364c7c60b6c5c8d02e522e815328aaea3f20e3b7b7ef52c42d",
-  "receiptRoot": "0x056b23fbba480696b65fe5a59b8f2148a1299103c4f57df839233af2cf4ca2d2",
-  "logsHash": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-  "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-  "receipts": [
-   {
-    "root": "0x",
-    "status": "0x1",
-    "cumulativeGasUsed": "0x5208",
-    "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-    "logs": null,
-    "transactionHash": "0x0557bacce3375c98d806609b8d5043072f0b6a8bae45ae5a67a00d3a1a18d673",
-    "contractAddress": "0x0000000000000000000000000000000000000000",
-    "gasUsed": "0x5208",
-    "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
-    "transactionIndex": "0x0"
-   }
-  ],
-  "rejected": [
-   {
-    "index": 1,
-    "error": "nonce too low: address 0x8A8eAFb1cf62BfBeb1741769DAE1a9dd47996192, tx: 0 state: 1"
-   }
+const transactionBundle = [
+    {
+      signedTransaction: SIGNED_ORACLE_UPDATE_FROM_PENDING_POOL // serialized signed transaction hex
+    },
+    {
+      signer: wallet, // ethers signer
+      transaction: transaction // ethers populated transaction object
+    }
   ]
- }
+```
+
+## Block Targeting
+The last thing required for `sendBundle()` is block targeting. Every bundle specifically references a single block. If your bundle is valid for multiple blocks (including all blocks until it is mined), `sendBundle()` must be called for every block, ideally on one of the blocks immediately prior. This gives you a chance to re-evaluate the opportunity you are capturing and re-sign your transactions with a higher nonce, if necessary.
+
+The block should always be a _future_ block, never the current one.
+
+```ts
+const targetBlockNumber = (await provider.getBlockNumber()) + 1
+```
+
+## Gas Prices and EIP-1559
+Before EIP-1559 was activated, the most common way for searchers to submit transactions is with `gasPrice=0`, with an on-chain payment to `block.coinbase` conditional on the transaction's success. All transactions must pay `baseFee` now, an attribute of a block. For an example of how to ensure you are using this `baseFee`, see `demo.ts` in this repository. 
+
+```
+const block = await provider.getBlock(blockNumber)
+const maxBaseFeeInFutureBlock = FlashbotsBundleProvider.getMaxBaseFeeInFutureBlock(block.baseFeePerGas, BLOCKS_IN_THE_FUTURE)
+const eip1559Transaction = {
+    to: wallet.address,
+    type: 2,
+    maxFeePerGas: PRIORITY_FEE.add(maxBaseFeeInFutureBlock),
+    maxPriorityFeePerGas: PRIORITY_FEE,
+    gasLimit: 21000,
+    data: '0x',
+    chainId: CHAIN_ID
 }
 ```
 
-## About Ommers
+`FlashbotsBundleProvider.getMaxBaseFeeInFutureBlock` calculates the maximum baseFee that is possible `BLOCKS_IN_THE_FUTURE` blocks, given maximum expansion on each block. You won't pay this fee, so long as it is specified as `maxFeePerGas`, you will only pay the block's `baseFee`.
 
-Mining rewards and ommer rewards might need to be added. This is how those are applied:
+Additionally if you have the `baseFeePerGas`, `gasUsed`, and `gasLimit` from the current block and are only targeting one block in the future you can get the exact base fee for the next block using `FlashbotsBundleProvider.getBaseFeeInNextBlock`. This method implements the math based on the [EIP1559 definition](https://github.com/ethereum/EIPs/blob/master/EIPS/eip-1559.md)
 
-- `block_reward` is the block mining reward for the miner (`0xaa`), of a block at height `N`.
-- For each ommer (mined by `0xbb`), with blocknumber `N-delta`
-  - (where `delta` is the difference between the current block and the ommer)
-  - The account `0xbb` (ommer miner) is awarded `(8-delta)/ 8 * block_reward`
-  - The account `0xaa` (block miner) is awarded `block_reward / 32`
+## Simulate and Send
 
-To make `state_t8n` apply these, the following inputs are required:
+Now that we have:
 
-- `state.reward`
-  - For ethash, it is `5000000000000000000` `wei`,
-  - If this is not defined, mining rewards are not applied,
-  - A value of `0` is valid, and causes accounts to be 'touched'.
-- For each ommer, the tool needs to be given an `address` and a `delta`. This
-  is done via the `env`.
+1. Flashbots Provider `flashbotsProvider`
+2. Bundle of transactions `transactionBundle`
+3. Block Number `targetBlockNumber`
 
-Note: the tool does not verify that e.g. the normal uncle rules apply,
-and allows e.g two uncles at the same height, or the uncle-distance. This means that
-the tool allows for negative uncle reward (distance > 8)
+We can run simulations and submit directly to miners, via the `mev-relay`.
 
-Example:
-`./testdata/5/env.json`:
-```json
+Simulate:
+```ts
+  const signedTransactions = await flashbotsProvider.signBundle(transactionBundle)
+  const simulation = await flashbotsProvider.simulate(signedTransactions, targetBlockNumber)
+  console.log(JSON.stringify(simulation, null, 2))
+```
+
+Send:
+```ts
+const flashbotsTransactionResponse = await flashbotsProvider.sendBundle(
+  transactionBundle,
+  targetBlockNumber,
+  )
+```
+
+## FlashbotsTransactionResponse
+After calling `sendBundle`, this provider will return a Promise of an object with helper functions related to the bundle you submitted.
+
+These functions return metadata available at transaction submission time, as well as the following functions which can wait, track, and simulate the bundle's behavior.
+
+- `bundleTransactions()` - An array of transaction descriptions sent to the relay, including hash, nonce, and the raw transaction.
+- `receipts()` - Returns promise of an array of transaction receipts corresponding to the transaction hashes that were relayed as part of the bundle. Will not wait for block to be mined; could return incomplete information
+- `wait()` - Returns a promise which will wait for target block number to be reached _OR_ one of the transactions to become invalid due to nonce-issues (including, but not limited to, one of the transactions from your bundle being included too early). Returns the wait resolution as a status enum
+- `simulate()` - Returns a promise of the transaction simulation, once the proper block height has been reached. Use this function to troubleshoot failing bundles and verify miner profitability
+
+## Optional eth_sendBundle arguments
+
+Beyond target block number, an object can be passed in with optional attributes:
+```ts
 {
-  "currentCoinbase": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "currentDifficulty": "0x20000",
-  "currentGasLimit": "0x750a163df65e8a",
-  "currentNumber": "1",
-  "currentTimestamp": "1000",
-  "ommers": [
-    {"delta":  1, "address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
-    {"delta":  2, "address": "0xcccccccccccccccccccccccccccccccccccccccc" }
-  ]
+  minTimestamp, // optional minimum timestamp at which this bundle is valid (inclusive)
+  maxTimestamp, // optional maximum timestamp at which this bundle is valid (inclusive)
+  revertingTxHashes: [tx1, tx2] // optional list of transaction hashes allowed to revert. Without specifying here, any revert invalidates the entire bundle.
 }
 ```
-When applying this, using a reward of `0x80`
-Output:
-```json
-{
- "alloc": {
-  "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
-   "balance": "0x88"
-  },
-  "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {
-   "balance": "0x70"
-  },
-  "0xcccccccccccccccccccccccccccccccccccccccc": {
-   "balance": "0x60"
-  }
- }
-}
-```
-### Future EIPS
 
-It is also possible to experiment with future eips that are not yet defined in a hard fork.
-Example, putting EIP-1344 into Frontier:
-```
-./evm t8n --state.fork=Frontier+1344 --input.pre=./testdata/1/pre.json --input.txs=./testdata/1/txs.json --input.env=/testdata/1/env.json
-```
+### minTimestamp / maxTimestamp
 
-### Block history
+While each bundle targets only a single block, you can add a filter for validity based on the block's timestamp. This does *not* allow for targeting any block number based on a timestamp or instruct miners on what timestamp to use, it merely serves as a secondary filter.
 
-The `BLOCKHASH` opcode requires blockhashes to be provided by the caller, inside the `env`.
-If a required blockhash is not provided, the exit code should be `4`:
-Example where blockhashes are provided:
-```
-./evm --verbosity=1 t8n --input.alloc=./testdata/3/alloc.json --input.txs=./testdata/3/txs.json --input.env=./testdata/3/env.json  --trace
-INFO [07-27|11:53:40.960] Trie dumping started                     root=b7341d..857ea1
-INFO [07-27|11:53:40.960] Trie dumping complete                    accounts=3 elapsed="103.298µs"
-INFO [07-27|11:53:40.960] Wrote file                               file=alloc.json
-INFO [07-27|11:53:40.960] Wrote file                               file=result.json
+If your bundle is not valid before a certain time or includes an expiring opportunity, setting these values allows the miner to skip bundle processing earlier in the phase.
 
-```
+Additionally, you could target several blocks in the future, but with a strict maxTimestamp, to ensure your bundle is considered for inclusion up to a specific time, regardless of how quickly blocks are mined in that timeframe.
 
-```
-cat trace-0-0x72fadbef39cd251a437eea619cfeda752271a5faaaa2147df012e112159ffb81.jsonl | grep BLOCKHASH -C2
-```
-```
-{"pc":0,"op":96,"gas":"0x5f58ef8","gasCost":"0x3","memory":"0x","memSize":0,"stack":[],"returnData":"0x","depth":1,"refund":0,"opName":"PUSH1","error":""}
-{"pc":2,"op":64,"gas":"0x5f58ef5","gasCost":"0x14","memory":"0x","memSize":0,"stack":["0x1"],"returnData":"0x","depth":1,"refund":0,"opName":"BLOCKHASH","error":""}
-{"pc":3,"op":0,"gas":"0x5f58ee1","gasCost":"0x0","memory":"0x","memSize":0,"stack":["0xdac58aa524e50956d0c0bae7f3f8bb9d35381365d07804dd5b48a5a297c06af4"],"returnData":"0x","depth":1,"refund":0,"opName":"STOP","error":""}
-{"output":"","gasUsed":"0x17","time":156276}
-```
+### Reverting Transaction Hashes
 
-In this example, the caller has not provided the required blockhash:
-```
-./evm t8n --input.alloc=./testdata/4/alloc.json --input.txs=./testdata/4/txs.json --input.env=./testdata/4/env.json --trace
-ERROR(4): getHash(3) invoked, blockhash for that block not provided
-```
-Error code: 4
+Transaction bundles will not be considered for inclusion if they include *any* transactions that revert or fail. While this is normally desirable, there are some advanced use-cases where a searcher might WANT to bring a failing transaction to the chain. This is normally desirable for nonce management. Consider:
 
-### Chaining
+Transaction Nonce #1 = Failed (unrelated) token transfer
+Transaction Nonce #2 = DEX trade
 
-Another thing that can be done, is to chain invocations:
-```
-./evm t8n --input.alloc=./testdata/1/alloc.json --input.txs=./testdata/1/txs.json --input.env=./testdata/1/env.json --output.alloc=stdout | ./evm t8n --input.alloc=stdin --input.env=./testdata/1/env.json --input.txs=./testdata/1/txs.json
-INFO [07-27|11:53:41.049] rejected tx                              index=1 hash=0557ba..18d673 from=0x8A8eAFb1cf62BfBeb1741769DAE1a9dd47996192 error="nonce too low: address 0x8A8eAFb1cf62BfBeb1741769DAE1a9dd47996192, tx: 0 state: 1"
-INFO [07-27|11:53:41.050] Trie dumping started                     root=84208a..ae4e13
-INFO [07-27|11:53:41.050] Trie dumping complete                    accounts=3 elapsed="59.412µs"
-INFO [07-27|11:53:41.050] Wrote file                               file=result.json
-INFO [07-27|11:53:41.051] rejected tx                              index=0 hash=0557ba..18d673 from=0x8A8eAFb1cf62BfBeb1741769DAE1a9dd47996192 error="nonce too low: address 0x8A8eAFb1cf62BfBeb1741769DAE1a9dd47996192, tx: 0 state: 1"
-INFO [07-27|11:53:41.051] rejected tx                              index=1 hash=0557ba..18d673 from=0x8A8eAFb1cf62BfBeb1741769DAE1a9dd47996192 error="nonce too low: address 0x8A8eAFb1cf62BfBeb1741769DAE1a9dd47996192, tx: 0 state: 1"
-INFO [07-27|11:53:41.052] Trie dumping started                     root=84208a..ae4e13
-INFO [07-27|11:53:41.052] Trie dumping complete                    accounts=3 elapsed="45.734µs"
-INFO [07-27|11:53:41.052] Wrote file                               file=alloc.json
-INFO [07-27|11:53:41.052] Wrote file                               file=result.json
+If a searcher wants to bring #2 to the chain, #1 must be included first, and its failure is not related to the desired transaction #2. This is especially common during high gas times.
 
-```
-What happened here, is that we first applied two identical transactions, so the second one was rejected.
-Then, taking the poststate alloc as the input for the next state, we tried again to include
-the same two transactions: this time, both failed due to too low nonce.
+Optional parameter `revertingTxHashes` allows a searcher to specify an array of transactions that can (but are not required to) revert.
 
-In order to meaningfully chain invocations, one would need to provide meaningful new `env`, otherwise the
-actual blocknumber (exposed to the EVM) would not increase.
+## Paying for your bundle
 
-### Transactions in RLP form
+In addition to paying for a bundle with gas price, bundles can also conditionally pay a miner via:
+`block.coinbase.transfer(_minerReward)`
+or
+`block.coinbase.call{value: _minerReward}("");`
 
-It is possible to provide already-signed transactions as input to, using an `input.txs` which ends with the `rlp` suffix.
-The input format for RLP-form transactions is _identical_ to the _output_ format for block bodies. Therefore, it's fully possible
-to use the evm to go from `json` input to `rlp` input.
+(assuming _minerReward is a solidity `uint256` with the wei-value to be transferred directly to the miner)
 
-The following command takes **json** the transactions in `./testdata/13/txs.json` and signs them. After execution, they are output to `signed_txs.rlp`.:
-```
-./evm t8n --state.fork=London --input.alloc=./testdata/13/alloc.json --input.txs=./testdata/13/txs.json --input.env=./testdata/13/env.json --output.result=alloc_jsontx.json --output.body=signed_txs.rlp
-INFO [07-27|11:53:41.124] Trie dumping started                     root=e4b924..6aef61
-INFO [07-27|11:53:41.124] Trie dumping complete                    accounts=3 elapsed="94.284µs"
-INFO [07-27|11:53:41.125] Wrote file                               file=alloc.json
-INFO [07-27|11:53:41.125] Wrote file                               file=alloc_jsontx.json
-INFO [07-27|11:53:41.125] Wrote file                               file=signed_txs.rlp
+The entire value of the bundle is added up at the end, so not every transaction needs to have a gas price or `block.coinbase` payment, so long as at least one does, and pays enough to support the gas used in non-paying transactions.
 
+Note: Gas-fees will ONLY benefit your bundle if the transaction is not already present in the mempool. When including a pending transaction in your bundle, it is similar to that transaction having a gas price of `0`; other transactions in your bundle will need to pay more for the gas it uses.
+
+## Bundle and User Statistics
+The Flashbots relay can also return statistics about you as a user (identified solely by your signing address) and any bundle previously submitted.
+
+- `getUserStats()` returns aggregate metrics about past performance, including if your signing key is currently eligible for the "high priority" queue. [Read more about searcher reputation here](https://docs.flashbots.net/flashbots-auction/searchers/advanced/reputation)
+- `getBundleStats(bundleHash, targetBlockNumber)` returns data specific to a single bundle submission, including detailed timestamps for the various phases a bundle goes before reaching miners. You can get the bundleHash from the simulation:
+  ```js
+  const simulation = await flashbotsProvider.simulate(signedTransactions, targetBlockNumber)
+  console.log(simulation.bundleHash)
+  ```
+
+## Investigating Losses
+
+When your bundle fails to land in the specified block, there are many reasons why this could have occurred. For a list of reasons, check out [Flashbots Docs : Why didn't my transaction get included?](https://docs.flashbots.net/flashbots-auction/searchers/faq/#why-didnt-my-transaction-get-included). To aid in troubleshooting, this library offers a method that will simulate a bundle in multiple positions to identify the competing bundle that landed on chain (if there was one) and calculate the relevant pricing.
+
+For usage instructions, check out the `demo-research.ts`.
+
+## How to run demo.ts
+
+Included is a simple demo of how to construct the FlashbotsProvider with auth signer authentication and submit a [non-functional] bundle. This will not yield any mev, but serves as a sample initialization to help integrate into your own functional searcher.
+
+## Flashbots on Goerli
+
+To test Flashbots before going to mainnet, you can use the Goerli Flashbots relay, which works in conjunction with a Flashbots-enabled Goerli validator. Flashbots on Goerli requires two simple changes:
+
+1. Ensure your genericProvider passed in to the FlashbotsBundleProvider constructor is connected to Goerli (gas estimates and nonce requests need to correspond to the correct chain):
+```ts
+import { providers } from 'ethers'
+const provider = providers.getDefaultProvider('goerli')
 ```
 
-The `output.body` is the rlp-list of transactions, encoded in hex and placed in a string a'la `json` encoding rules:
-```
-cat signed_txs.rlp
-"0xf8d2b86702f864010180820fa08284d09411111111111111111111111111111111111111118080c001a0b7dfab36232379bb3d1497a4f91c1966b1f932eae3ade107bf5d723b9cb474e0a06261c359a10f2132f126d250485b90cf20f30340801244a08ef6142ab33d1904b86702f864010280820fa08284d09411111111111111111111111111111111111111118080c080a0d4ec563b6568cd42d998fc4134b36933c6568d01533b5adf08769270243c6c7fa072bf7c21eac6bbeae5143371eef26d5e279637f3bd73482b55979d76d935b1e9"
-```
-
-We can use `rlpdump` to check what the contents are:
-```
-rlpdump -hex $(cat signed_txs.rlp | jq -r )
-[
-  02f864010180820fa08284d09411111111111111111111111111111111111111118080c001a0b7dfab36232379bb3d1497a4f91c1966b1f932eae3ade107bf5d723b9cb474e0a06261c359a10f2132f126d250485b90cf20f30340801244a08ef6142ab33d1904,
-  02f864010280820fa08284d09411111111111111111111111111111111111111118080c080a0d4ec563b6568cd42d998fc4134b36933c6568d01533b5adf08769270243c6c7fa072bf7c21eac6bbeae5143371eef26d5e279637f3bd73482b55979d76d935b1e9,
-]
-```
-Now, we can now use those (or any other already signed transactions), as input, like so:
-```
-./evm t8n --state.fork=London --input.alloc=./testdata/13/alloc.json --input.txs=./signed_txs.rlp --input.env=./testdata/13/env.json --output.result=alloc_rlptx.json
-INFO [07-27|11:53:41.253] Trie dumping started                     root=e4b924..6aef61
-INFO [07-27|11:53:41.253] Trie dumping complete                    accounts=3 elapsed="128.445µs"
-INFO [07-27|11:53:41.253] Wrote file                               file=alloc.json
-INFO [07-27|11:53:41.255] Wrote file                               file=alloc_rlptx.json
-
-```
-
-You might have noticed that the results from these two invocations were stored in two separate files.
-And we can now finally check that they match.
-```
-cat alloc_jsontx.json | jq .stateRoot && cat alloc_rlptx.json | jq .stateRoot
-"0xe4b924a6adb5959fccf769d5b7bb2f6359e26d1e76a2443c5a91a36d826aef61"
-"0xe4b924a6adb5959fccf769d5b7bb2f6359e26d1e76a2443c5a91a36d826aef61"
+2. Set the relay endpoint to `https://relay-goerli.flashbots.net/`
+```ts
+const flashbotsProvider = await FlashbotsBundleProvider.create(
+  provider,
+  authSigner,
+  'https://relay-goerli.flashbots.net/',
+  'goerli')
 ```
