@@ -1,3 +1,4 @@
+![BRB Pixel-01 32 32](https://user-images.githubusercontent.com/95605576/150603205-6b315152-9440-4fea-a1ab-ac01394f3919.png)
 Berylbit PoW chain using Ethash, EPI-Burn and geth. The chain will be using bot congestion flashbot bundles through nodes. Soon, We will work towards in implenting private TXN..
 
 Source files for flashbot https://docs.flashbots.net/
