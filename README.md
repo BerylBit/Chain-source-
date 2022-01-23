@@ -1,5 +1,4 @@
-![photo_2022-01-23_10-28-53](https://user-images.githubusercontent.com/95605576/150687019-ff958c19-3d0a-4bd9-ba97-b1ffbaa5977c.jpg)
-
+!
 
 ---
 description: BerylBit - BRB
