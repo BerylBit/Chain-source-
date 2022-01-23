@@ -1,10 +1,6 @@
-# Untitled
+# Introduction
 
 ![photo\_2022-01-23\_10-28-53](https://user-images.githubusercontent.com/95605576/150687063-fd89120e-f061-401f-bb20-7e508499a68c.jpg)
-
-***
-
-###
 
 ### What is a blockchain, and what is the purpose of it?
 
