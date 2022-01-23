@@ -1,3 +1,7 @@
+---
+description: A brief intro of what is a blockchain and the goal of berylbit
+---
+
 # Introduction
 
 ![photo\_2022-01-23\_10-28-53](https://user-images.githubusercontent.com/95605576/150687063-fd89120e-f061-401f-bb20-7e508499a68c.jpg)
